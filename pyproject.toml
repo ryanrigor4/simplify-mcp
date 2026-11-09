@@ -1,0 +1,6 @@
+[project]
+name = "simplify-mcp"
+version = "0.1.0"
+description = "A local, read-only MCP server for the Simplify job application tracker"
+requires-python = ">=3.11"
+dependencies = ["mcp>=2.3,<3", "httpx>=0.28,<1", "pydantic>=2,<3"]
