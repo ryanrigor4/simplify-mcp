@@ -1,3 +1,4 @@
+import asyncio
 import os
 from datetime import date, datetime
 from typing import Annotated
@@ -97,11 +98,72 @@ class TrackerPage(BaseModel):
     total: int
 
 
+class TrackerSession:
+    def __init__(self) -> None:
+        self._access: tuple[str, str] | None = None
+        self._refresh_lock = asyncio.Lock()
+
+    @staticmethod
+    async def _get(
+        client: httpx.AsyncClient,
+        params: dict[str, int | str],
+        cookie_name: str,
+        token: str,
+        csrf: str,
+    ) -> httpx.Response:
+        # Build each request explicitly so the client's cookie jar cannot send
+        # the long-lived refresh cookie alongside a cached access cookie.
+        request = httpx.Request(
+            "GET",
+            TRACKER_URL,
+            params=params,
+            cookies={cookie_name: token, "csrf": csrf},
+            headers={"Accept": "application/json", "X-CSRF-Token": unquote(csrf)},
+        )
+        return await client.send(request)
+
+    async def get(
+        self, client: httpx.AsyncClient, params: dict[str, int | str]
+    ) -> httpx.Response:
+        access = self._access
+        if access is not None:
+            response = await self._get(client, params, "authorization", *access)
+            if response.status_code != 401:
+                return response
+
+        async with self._refresh_lock:
+            # Another tool call may have refreshed the access cookie while
+            # this request was in flight or waiting for the lock.
+            latest = self._access
+            if latest is not None and latest != access:
+                response = await self._get(client, params, "authorization", *latest)
+                if response.status_code != 401:
+                    return response
+
+            self._access = None
+            refresh = os.getenv("SIMPLIFY_REFRESH")
+            csrf = os.getenv("SIMPLIFY_CSRF")
+            if not refresh or not csrf:
+                raise ValueError("Set SIMPLIFY_REFRESH and SIMPLIFY_CSRF using the README.")
+
+            # Simplify issues a fresh access cookie on an authenticated tracker
+            # read that uses the refresh cookie.
+            response = await self._get(client, params, "refresh", refresh, csrf)
+            if response.status_code == 200:
+                token = response.cookies.get("authorization")
+                if token:
+                    self._access = (token, csrf)
+            return response
+
+
+tracker_session = TrackerSession()
+
+
 async def fetch_tracker_page(client: httpx.AsyncClient, page: int) -> TrackerPage:
     try:
-        response = await client.get(
-            TRACKER_URL,
-            params={
+        response = await tracker_session.get(
+            client,
+            {
                 "page": page,
                 "size": TRACKER_PAGE_SIZE,
                 "sort_by": "tracked_date",
@@ -111,9 +173,10 @@ async def fetch_tracker_page(client: httpx.AsyncClient, page: int) -> TrackerPag
     except httpx.RequestError:
         raise RuntimeError("Could not reach the Simplify tracker.") from None
 
-    if response.status_code in (401, 403):
+    if response.status_code == 401:
         raise RuntimeError(
-            "Simplify rejected the session. Replace both cookies using the README."
+            "Simplify rejected the saved session. Sign in to Simplify, replace both "
+            "cookies in .env, and restart the MCP server. See the README."
         )
     if response.status_code == 429:
         raise RuntimeError("Simplify rate-limited the request. Try again later.")
@@ -129,17 +192,7 @@ async def fetch_tracker_page(client: httpx.AsyncClient, page: int) -> TrackerPag
 
 
 async def fetch_applications() -> list[Application]:
-    refresh = os.getenv("SIMPLIFY_REFRESH")
-    csrf = os.getenv("SIMPLIFY_CSRF")
-    if not refresh or not csrf:
-        raise ValueError("Set SIMPLIFY_REFRESH and SIMPLIFY_CSRF using the README.")
-
-    async with httpx.AsyncClient(
-        cookies={"refresh": refresh, "csrf": csrf},
-        headers={"Accept": "application/json", "X-CSRF-Token": unquote(csrf)},
-        timeout=30,
-        trust_env=False,
-    ) as client:
+    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
         first = await fetch_tracker_page(client, 0)
         records = {record.id: record for record in first.items}
         for page in range(1, first.pages):

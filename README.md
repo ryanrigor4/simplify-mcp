@@ -15,7 +15,11 @@ uv sync --locked
 2. Open a successful GET to `https://api.simplify.jobs/v2/candidate/me/tracker/`. In the request's **Cookies** tab, copy the full values for `refresh` and `csrf`.
 3. Set `SIMPLIFY_REFRESH` and `SIMPLIFY_CSRF` in the local `.env`. Use the two values from the same browser session. Git ignores this file.
 
-If Simplify returns 401 or 403, repeat these steps with a working browser session and restart the MCP server.
+### Session renewal
+
+Simplify issues a short-lived `authorization` cookie when the tracker accepts the saved `refresh` and `csrf` pair. The server caches the access cookie in memory and reuses it across tool calls. It uses the saved pair on the first request and once more if Simplify returns HTTP 401 for the cached access cookie.
+
+If Simplify rejects the saved pair, sign back in, repeat the cookie setup above, and restart the MCP server. Simplify can revoke the saved session before the cookies' advertised expiration.
 
 ## Connect an agent
 
@@ -48,4 +52,4 @@ Each call reads Simplify's first-party `GET /v2/candidate/me/tracker/` JSON endp
 
 The CSV export includes both sets of records and their statuses, but Simplify rewrites some job titles in that export. The JSON list preserves the original titles and record IDs. The chart endpoint returns aggregates, and the applied-posting endpoint returns only a subset of posting IDs.
 
-The server reads the current tracker state on each call. Two browser cookies and the matching CSRF header authenticate the request. This endpoint is used by the Simplify website, so changes to its session or response format may require an update.
+The server reads the current tracker state on each call. This endpoint is used by the Simplify website, so changes to its session or response format may require an update.
